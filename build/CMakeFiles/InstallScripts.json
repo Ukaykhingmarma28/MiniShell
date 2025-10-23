@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/maklu/Code/terminal/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

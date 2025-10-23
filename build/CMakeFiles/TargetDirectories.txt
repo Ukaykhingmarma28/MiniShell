@@ -1,0 +1,7 @@
+/home/maklu/Code/terminal/build/CMakeFiles/minishell.dir
+/home/maklu/Code/terminal/build/CMakeFiles/edit_cache.dir
+/home/maklu/Code/terminal/build/CMakeFiles/rebuild_cache.dir
+/home/maklu/Code/terminal/build/CMakeFiles/list_install_components.dir
+/home/maklu/Code/terminal/build/CMakeFiles/install.dir
+/home/maklu/Code/terminal/build/CMakeFiles/install/local.dir
+/home/maklu/Code/terminal/build/CMakeFiles/install/strip.dir

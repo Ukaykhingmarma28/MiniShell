@@ -2,40 +2,15 @@
  *  minishell.cpp
  *  -----------------------------
  *  A minimal, educational shell written in C++17.
- *  Supports:
- *    • Running programs via execvp()
- *    • Input/output redirection (<, >, >>)
- *    • Pipelining with |
- *    • Built-in commands: cd, exit
  *
  *  Author: Ukay Khing Marma Joy
- *  GitHub: https://github.com/ukaykhing
+ *  GitHub: https://github.com/Ukaykhingmarma28
  *
  *  Created: October 2025
  *  Language: C++17 (POSIX / Linux)
  *  License: MIT License
  *
- *  -------------------------------------------------------------------------
- *  Permission is hereby granted, free of charge, to any person obtaining a
- *  copy of this software and associated documentation files (the “Software”),
- *  to deal in the Software without restriction, including without limitation
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
- *  and/or sell copies of the Software, and to permit persons to whom the
- *  Software is furnished to do so, subject to the following conditions:
- *
- *  The above copyright notice and this permission notice shall be included
- *  in all copies or substantial portions of the Software.
- *
- *  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- *  THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- *  IN THE SOFTWARE.
- *  -------------------------------------------------------------------------
  */
-
 
  #include <algorithm>
  #include <cerrno>
@@ -49,107 +24,123 @@
  #include <sys/wait.h>
  #include <unistd.h>
  #include <vector>
+ #include <termios.h>
+ 
+ #include "minishell_colors.hpp"
+ #include "minishell_tokenize.hpp"
+ #include "minishell_expand.hpp"
+ #include "minishell_jobs.hpp"
+ #include "minishell_builtins.hpp"
+ #include "minishell_prompt.hpp"
+ 
+ #ifdef MINISHELL_HAVE_READLINE
+ #  include <readline/readline.h>
+ #  include <readline/history.h>
+ extern "C" int rl_catch_signals;
+ #endif
+ 
  
  struct Redir {
-     std::string in, out;
+     std::string in;
+     std::string out;
      bool append = false;
  };
  
- // split by whitespace
- std::vector<std::string> split_ws(const std::string& s) {
-     std::istringstream iss(s);
-     std::vector<std::string> toks;
-     std::string t;
-     while (iss >> t) toks.push_back(t);
-     return toks;
- }
+ // -----------------------------------------------------------
+ //  Global State
+ // -----------------------------------------------------------
+ static pid_t g_shell_pgid = -1;
+ static mshell::JobTable g_jobs;
  
- // split by |
+ // -----------------------------------------------------------
+ //  Helpers
+ // -----------------------------------------------------------
+
  std::vector<std::string> split_pipeline(const std::string& line) {
      std::vector<std::string> parts;
      std::string cur;
-     for (size_t i = 0; i < line.size(); ++i) {
-         if (line[i] == '|') {
+     int dq = 0, sq = 0;
+     for (char c : line) {
+         if (c == '"' && !sq) dq ^= 1;
+         else if (c == '\'' && !dq) sq ^= 1;
+         if (c == '|' && !dq && !sq) {
              if (!cur.empty()) { parts.push_back(cur); cur.clear(); }
-         } else {
-             cur.push_back(line[i]);
-         }
+         } else cur.push_back(c);
      }
      if (!cur.empty()) parts.push_back(cur);
      return parts;
  }
  
- // parse redirections
  void parse_redirections(std::vector<std::string>& argv, Redir& r) {
      std::vector<std::string> clean;
      for (size_t i = 0; i < argv.size(); ++i) {
-         if (argv[i] == "<" && i + 1 < argv.size()) {
-             r.in = argv[i + 1]; ++i;
-         } else if (argv[i] == ">" && i + 1 < argv.size()) {
-             r.out = argv[i + 1]; r.append = false; ++i;
-         } else if (argv[i] == ">>" && i + 1 < argv.size()) {
-             r.out = argv[i + 1]; r.append = true; ++i;
-         } else {
-             clean.push_back(argv[i]);
-         }
+         if (argv[i] == "<" && i + 1 < argv.size()) { r.in = argv[i + 1]; ++i; }
+         else if (argv[i] == ">" && i + 1 < argv.size()) { r.out = argv[i + 1]; r.append = false; ++i; }
+         else if (argv[i] == ">>" && i + 1 < argv.size()) { r.out = argv[i + 1]; r.append = true; ++i; }
+         else clean.push_back(argv[i]);
      }
      argv.swap(clean);
  }
  
  char** vec_to_argv(const std::vector<std::string>& v) {
-     char** args = new char*[v.size() + 1];
+     char** a = new char*[v.size() + 1];
      for (size_t i = 0; i < v.size(); ++i)
-         args[i] = strdup(v[i].c_str());
-     args[v.size()] = nullptr;
-     return args;
+         a[i] = strdup(v[i].c_str());
+     a[v.size()] = nullptr;
+     return a;
  }
  
- void free_argv(char** args) {
-     if (!args) return;
-     for (size_t i = 0; args[i] != nullptr; ++i) free(args[i]);
-     delete[] args;
+ void free_argv(char** a) {
+     if (!a) return;
+     for (size_t i = 0; a[i]; ++i) free(a[i]);
+     delete[] a;
  }
  
+ // -----------------------------------------------------------
+ //  Run pipeline
+ // -----------------------------------------------------------
+
  int run_pipeline(std::vector<std::vector<std::string>>& commands,
-                  std::vector<Redir>& redirs) {
-     int n = static_cast<int>(commands.size());
-     std::vector<pid_t> pids;
-     pids.reserve(n);
+                  std::vector<Redir>& redirs,
+                  mshell::JobTable* jt,
+                  bool background)
+ {
+     int n = (int)commands.size();
+     std::vector<int> fds(std::max(0, (n - 1) * 2));
+     for (int i = 0; i < n - 1; ++i)
+         if (pipe(&fds[2 * i]) == -1) { perror("pipe"); return 1; }
  
-     std::vector<int> fds; fds.resize(std::max(0, (n - 1) * 2));
-     for (int i = 0; i < n - 1; ++i) {
-         if (pipe(&fds[2*i]) == -1) {
-             perror("pipe");
-             return 1;
-         }
-     }
+     pid_t pgid = -1;
  
      for (int i = 0; i < n; ++i) {
          pid_t pid = fork();
          if (pid < 0) { perror("fork"); return 1; }
          if (pid == 0) {
-             if (i > 0) {
-                 if (dup2(fds[2*(i-1)] , STDIN_FILENO) == -1) { perror("dup2 in"); _exit(1); }
-             }
-             if (i < n - 1) {
-                 if (dup2(fds[2*i + 1], STDOUT_FILENO) == -1) { perror("dup2 out"); _exit(1); }
-             }
-             for (int k = 0; k < (int)fds.size(); ++k) close(fds[k]);
+             // ---- Child ----
+             if (i == 0) setpgid(0, 0); else setpgid(0, pgid);
+             signal(SIGINT, SIG_DFL);
+             signal(SIGTSTP, SIG_DFL);
+             signal(SIGQUIT, SIG_DFL);
+             signal(SIGTTIN, SIG_DFL);
+             signal(SIGTTOU, SIG_DFL);
  
-             // redirections
+             if (!background) tcsetpgrp(STDIN_FILENO, getpgrp());
+             if (i > 0) dup2(fds[2 * (i - 1)], STDIN_FILENO);
+             if (i < n - 1) dup2(fds[2 * i + 1], STDOUT_FILENO);
+             for (int fd : fds) close(fd);
+ 
              if (!redirs[i].in.empty()) {
                  int fd = open(redirs[i].in.c_str(), O_RDONLY);
                  if (fd == -1 || dup2(fd, STDIN_FILENO) == -1) { perror("redir <"); _exit(1); }
                  close(fd);
              }
              if (!redirs[i].out.empty()) {
-                 int flags = O_WRONLY | O_CREAT | (redirs[i].append ? O_APPEND : O_TRUNC);
-                 int fd = open(redirs[i].out.c_str(), flags, 0644);
+                 int fd = open(redirs[i].out.c_str(),
+                               O_WRONLY | O_CREAT | (redirs[i].append ? O_APPEND : O_TRUNC), 0644);
                  if (fd == -1 || dup2(fd, STDOUT_FILENO) == -1) { perror("redir >"); _exit(1); }
                  close(fd);
              }
  
-             // exec
              if (commands[i].empty()) _exit(0);
              char** argv = vec_to_argv(commands[i]);
              execvp(argv[0], argv);
@@ -157,74 +148,121 @@
              free_argv(argv);
              _exit(127);
          } else {
-             pids.push_back(pid);
+             if (i == 0) { pgid = pid; setpgid(pid, pgid); }
+             else setpgid(pid, pgid);
          }
      }
+ 
      for (int fd : fds) close(fd);
  
-     // wait for all
-     int status = 0, last_status = 0;
-     for (pid_t pid : pids) {
-         if (waitpid(pid, &status, 0) > 0) last_status = status;
+     if (background && jt) {
+         std::ostringstream oss;
+         for (size_t i = 0; i < commands.size(); ++i) {
+             for (auto& s : commands[i]) oss << s << ' ';
+             if (i + 1 < commands.size()) oss << "| ";
+         }
+         int id = jt->add(pgid, oss.str());
+         std::cout << "[" << id << "] " << pgid << "\n";
+         return 0;
      }
-     return WIFEXITED(last_status) ? WEXITSTATUS(last_status) : 1;
+ 
+     // Foreground execution
+     tcsetpgrp(STDIN_FILENO, pgid);
+     int status = 0;
+     waitpid(-pgid, &status, 0);
+     tcsetpgrp(STDIN_FILENO, g_shell_pgid);
+     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
  }
+
+ static void sigchld_handler(int) { g_jobs.on_sigchld(); }
  
+ // -----------------------------------------------------------
+ //  Entry point
+ // -----------------------------------------------------------
+
  int main() {
-     // ignore Ctrl-C signals
-     signal(SIGINT, SIG_IGN);
+     setpgid(0, 0);
+     g_shell_pgid = getpgrp();
+     tcsetpgrp(STDIN_FILENO, g_shell_pgid);
  
+     signal(SIGTTIN, SIG_IGN);
+     signal(SIGTTOU, SIG_IGN);
+     signal(SIGCHLD, sigchld_handler);
+ 
+ #ifdef MINISHELL_HAVE_READLINE
+     rl_catch_signals = 0;
+ #endif
+ 
+     mshell::BuiltinEnv benv;
+     mshell::load_rc(benv);
+ 
+     int last_status = 0;
      while (true) {
-         // Prompt
-         char cwd_buf[4096];
-         if (getcwd(cwd_buf, sizeof(cwd_buf))) {
-             std::cout << "[mini] " << cwd_buf << " $ ";
-         } else {
-             std::cout << "[mini] $ ";
-         }
-         std::cout.flush();
+         std::string prompt =
+ #ifdef MINISHELL_HAVE_READLINE
+             mshell::build_prompt_readline(last_status);
+ #else
+             mshell::build_prompt_plain(last_status);
+ #endif
  
-         // Read
          std::string line;
-         if (!std::getline(std::cin, line)) break;
-         // trim
-         if (std::all_of(line.begin(), line.end(), isspace)) continue;
+ #ifdef MINISHELL_HAVE_READLINE
+         static bool rl_init = false;
+         if (!rl_init) { using_history(); rl_init = true; }
+         if (char* buf = readline(prompt.c_str())) {
+             line = buf;
+             free(buf);
+             if (!line.empty()) add_history(line.c_str());
+         } else { std::cout << "\n"; break; }
+ #else
+         std::cout << prompt << std::flush;
+         if (!std::getline(std::cin, line)) { std::cout << "\n"; break; }
+ #endif
+         if (line.empty()) continue;
  
-         auto stages = split_pipeline(line);
-         
-         if (stages.size() == 1) {
-             auto toks = split_ws(stages[0]);
-             if (toks.empty()) continue;
- 
-             if (toks[0] == "exit") {
-                 return 0;
-             }
-             if (toks[0] == "cd") {
-                 const char* target = nullptr;
-                 if (toks.size() >= 2) target = toks[1].c_str();
-                 else target = getenv("HOME");
-                 if (!target) target = "/";
-                 if (chdir(target) != 0) {
-                     std::cerr << "cd: " << strerror(errno) << "\n";
-                 }
-                 continue;
-             }
+         bool background = false;
+         std::string trimmed = line;
+         while (!trimmed.empty() && isspace((unsigned char)trimmed.back())) trimmed.pop_back();
+         if (!trimmed.empty() && trimmed.back() == '&') {
+             background = true;
+             trimmed.pop_back();
          }
  
-         // Build argv and redirs for each stage
+         auto stages = split_pipeline(trimmed);
          std::vector<std::vector<std::string>> commands;
-         std::vector<Redir> redirs;
-         commands.reserve(stages.size());
-         redirs.resize(stages.size());
+         std::vector<Redir> redirs(stages.size());
  
          for (size_t i = 0; i < stages.size(); ++i) {
-             auto toks = split_ws(stages[i]);
-             parse_redirections(toks, redirs[i]);
-             commands.push_back(std::move(toks));
+             auto toks = mshell::tokenize(stages[i]);
+             std::vector<std::string> words; words.reserve(toks.size());
+             for (auto& t : toks) {
+                 auto scalar = mshell::expand_scalars(t.text);
+                 auto expanded = mshell::glob_expand(scalar);
+                 words.insert(words.end(), expanded.begin(), expanded.end());
+             }
+             parse_redirections(words, redirs[i]);
+             commands.push_back(std::move(words));
          }
  
-         run_pipeline(commands, redirs);
+         if (commands.empty()) continue;
+         commands.front() = mshell::alias_expand(benv, commands.front());
+ 
+         // Built-ins & job commands
+         if (stages.size() == 1 && !background) {
+             if (mshell::try_autocd(commands[0])) { last_status = 0; continue; }
+             int es = 0;
+             if (mshell::builtin_dispatch(benv, commands[0], es)) { last_status = es; continue; }
+             if (!commands[0].empty()) {
+                 const std::string& cmd = commands[0][0];
+                 if (cmd == "jobs") { g_jobs.list(); last_status = 0; continue; }
+                 if (cmd == "fg" && commands[0].size() > 1) { last_status = g_jobs.fg(std::stoi(commands[0][1])) ? 0 : 1; continue; }
+                 if (cmd == "bg" && commands[0].size() > 1) { last_status = g_jobs.bg(std::stoi(commands[0][1])) ? 0 : 1; continue; }
+                 if (cmd == "exit") break;
+             }
+         }
+         last_status = run_pipeline(commands, redirs, &g_jobs, background);
      }
+ 
      std::cout << "\n";
      return 0;
  }

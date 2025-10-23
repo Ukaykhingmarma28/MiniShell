@@ -2,7 +2,20 @@
 set -euo pipefail
 
 # =============================================================================
-# minishell installer (builds, installs, sets ~/.minishellrc, and updates /etc/shells)
+# minishell installer (always generates ~/.minishellrc)
+# =============================================================================
+# Usage:
+#   ./install.sh                   # build if needed, install to /usr/local/bin, write ~/.minishellrc
+#   ./install.sh --user            # install to ~/.local/bin (no sudo)
+#   ./install.sh --prefix /opt     # custom install prefix (bin -> <prefix>/bin)
+#   ./install.sh --no-build        # skip building (assume ./build/minishell exists)
+#   ./install.sh --keep-rc         # DO NOT modify ~/.minishellrc
+#   ./install.sh --force-rc        # overwrite ~/.minishellrc (backup to .bak)
+#
+# Notes:
+#   - Will invoke ./build.sh in Release mode if ./build/minishell is missing
+#   - Will ALWAYS generate ~/.minishellrc unless --keep-rc is passed
+#   - If ~/.minishellrc exists, it is backed up to ~/.minishellrc.bak (unless --keep-rc)
 # =============================================================================
 
 # --- defaults ---
@@ -97,25 +110,16 @@ if [[ ! -d "${TARGET_DIR}" ]]; then
   fi
 fi
 
-# --- install or replace existing binary ---
+# Copy binary (use sudo if needed)
 if have_write "${TARGET_DIR}"; then
-  if [[ -f "${TARGET_BIN}" ]]; then
-    say "Replacing existing ${TARGET_BIN}"
-  else
-    say "Installing ${TARGET_BIN}"
-  fi
   install -m 0755 "${SRC_BIN}" "${TARGET_BIN}"
 else
   if $USER_MODE; then
+    warn "No write permission to ${TARGET_DIR}; attempting user create/copy."
     mkdir -p "${TARGET_DIR}"
-    say "Installing to ${TARGET_BIN} (user mode)"
     install -m 0755 "${SRC_BIN}" "${TARGET_BIN}"
   else
-    if [[ -f "${TARGET_BIN}" ]]; then
-      say "Replacing existing ${TARGET_BIN} (requires sudo)"
-    else
-      say "Installing ${TARGET_BIN} (requires sudo)"
-    fi
+    say "Copying binary (requires sudo)…"
     sudo install -m 0755 "${SRC_BIN}" "${TARGET_BIN}"
   fi
 fi
@@ -132,7 +136,7 @@ if $USER_MODE; then
   esac
 fi
 
-# --- generate ~/.minishellrc (unless --keep-rc) ---
+# --- generate ~/.minishellrc (always, unless --keep-rc) ---
 RC="${HOME}/.minishellrc"
 if $KEEP_RC; then
   say "Keeping existing ${RC} (no changes)."
@@ -198,7 +202,6 @@ say "Installed: ${TARGET_BIN}"
 echo
 echo "Run minishell: ${BIN_NAME}"
 echo "Config file  : ${RC}"
-echo "To make MiniShell your default shell, run:"
+echo "Tip          : Re-run with --keep-rc to preserve your current rc, or --force-rc to overwrite without keeping a backup."
+echo "Shell usage  : To use MiniShell as your default shell, run:"
 echo "  chsh -s ${TARGET_BIN}"
-echo
-echo "Tip: Use --keep-rc to preserve your current rc, or --force-rc to overwrite without keeping a backup."

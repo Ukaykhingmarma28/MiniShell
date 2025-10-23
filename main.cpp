@@ -11,7 +11,7 @@
  *  License: MIT License
  *
  */
-
+ 
  #include <algorithm>
  #include <cerrno>
  #include <csignal>
@@ -39,12 +39,22 @@
  extern "C" int rl_catch_signals;
  #endif
  
- 
  struct Redir {
      std::string in;
      std::string out;
      bool append = false;
  };
+ 
+ // 🌟 Added: $$ variable expansion
+ std::string expand_variables(const std::string& input) {
+     std::string output = input;
+     size_t pos = 0;
+     while ((pos = output.find("$$", pos)) != std::string::npos) {
+         output.replace(pos, 2, std::to_string(getpid()));
+         pos += std::to_string(getpid()).length();
+     }
+     return output;
+ }
  
  // -----------------------------------------------------------
  //  Global State
@@ -55,7 +65,7 @@
  // -----------------------------------------------------------
  //  Helpers
  // -----------------------------------------------------------
-
+ 
  std::vector<std::string> split_pipeline(const std::string& line) {
      std::vector<std::string> parts;
      std::string cur;
@@ -99,7 +109,7 @@
  // -----------------------------------------------------------
  //  Run pipeline
  // -----------------------------------------------------------
-
+ 
  int run_pipeline(std::vector<std::vector<std::string>>& commands,
                   std::vector<Redir>& redirs,
                   mshell::JobTable* jt,
@@ -173,21 +183,25 @@
      tcsetpgrp(STDIN_FILENO, g_shell_pgid);
      return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
  }
-
+ 
  static void sigchld_handler(int) { g_jobs.on_sigchld(); }
  
  // -----------------------------------------------------------
  //  Entry point
  // -----------------------------------------------------------
-
+ 
  int main() {
      setpgid(0, 0);
      g_shell_pgid = getpgrp();
      tcsetpgrp(STDIN_FILENO, g_shell_pgid);
  
+     // 🌟 Added: Ignore background job signals
      signal(SIGTTIN, SIG_IGN);
      signal(SIGTTOU, SIG_IGN);
      signal(SIGCHLD, sigchld_handler);
+ 
+     // 🌟 Added: Let tools detect this as the shell
+     setenv("SHELL", "/usr/bin/minishell", 1);
  
  #ifdef MINISHELL_HAVE_READLINE
      rl_catch_signals = 0;
@@ -218,6 +232,10 @@
          std::cout << prompt << std::flush;
          if (!std::getline(std::cin, line)) { std::cout << "\n"; break; }
  #endif
+ 
+         // 🌟 Added: $$ expansion
+         line = expand_variables(line);
+ 
          if (line.empty()) continue;
  
          bool background = false;
@@ -247,7 +265,6 @@
          if (commands.empty()) continue;
          commands.front() = mshell::alias_expand(benv, commands.front());
  
-         // Built-ins & job commands
          if (stages.size() == 1 && !background) {
              if (mshell::try_autocd(commands[0])) { last_status = 0; continue; }
              int es = 0;

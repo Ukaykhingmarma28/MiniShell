@@ -19,7 +19,7 @@ set -euo pipefail
 # =============================================================================
 
 # --- defaults ---
-PREFIX="/usr/local"
+PREFIX="/usr/bin"
 USER_MODE=false
 NO_BUILD=false
 KEEP_RC=false

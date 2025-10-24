@@ -16,6 +16,9 @@
 #include <pwd.h>       
 #include <filesystem> 
 
+// Version info
+#define MINISHELL_VERSION "1.0.0"
+
 namespace mshell {
 
 // -------------------------------------------------------------------------------------------------
@@ -50,7 +53,7 @@ inline std::string unquote_if(const std::string& s) {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Minimal rc-line evaluator (supports: alias, export, echo, setprompt) — used by load_rc and source
+// Minimal rc-line evaluator (supports: alias, export, echo, setprompt) – used by load_rc and source
 // -------------------------------------------------------------------------------------------------
 inline void eval_rc_line(BuiltinEnv& env, std::string line) {
     // strip comments
@@ -118,6 +121,12 @@ inline bool builtin_dispatch(BuiltinEnv& env,
     if (argv.empty()) { exit_status = 0; return true; }
 
     const std::string& cmd = argv[0];
+
+    // Handle --version flag
+    if (cmd == "--version" || (argv.size() > 1 && argv[1] == "--version")) {
+        std::cout << "MiniShell version " << MINISHELL_VERSION << "\n";
+        exit_status = 0; return true;
+    }
 
     if (cmd == "cd") {
         const char* target = (argv.size() > 1) ? argv[1].c_str() : std::getenv("HOME");
